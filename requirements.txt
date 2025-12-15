@@ -5,3 +5,5 @@ opencv-python-headless
 av
 numpy
 Pillow
+scikit-learn
+joblib
