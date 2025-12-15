@@ -2,36 +2,30 @@ import streamlit as st
 import cv2
 import numpy as np
 import tensorflow as tf
-import joblib
-import json
 import av
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 
 # --- Konfigurasi Halaman ---
-st.set_page_config(layout="wide", page_title="Hybrid Emotion AI")
+st.set_page_config(layout="wide", page_title="Emotion AI Lite")
 
-# --- 1. Load Model Hybrid ---
+# --- 1. Load Model TFLite (Super Ringan) ---
 @st.cache_resource
-def load_models():
+def load_model():
     try:
-        # Load Feature Extractor (CNN)
-        cnn_model = tf.keras.models.load_model('emotion_feature_extractor.keras')
-        
-        # Load Classifier (Random Forest)
-        rf_model = joblib.load('emotion_rf_model.pkl')
-        
-        # Load Labels
-        with open('emotion_labels.json', 'r') as f:
-            label_map = json.load(f)
-        # Pastikan label urut sesuai index (0, 1, 2...)
-        labels = [label_map[str(i)] for i in range(len(label_map))]
-        
-        return cnn_model, rf_model, labels
+        # Load TFLite
+        interpreter = tf.lite.Interpreter(model_path="final_model.tflite")
+        interpreter.allocate_tensors()
+        return interpreter
     except Exception as e:
-        st.error(f"Error loading models: {e}")
-        return None, None, None
+        st.error(f"Error loading model: {e}")
+        return None
 
-cnn_model, rf_model, class_labels = load_models()
+interpreter = load_model()
+
+# Setup Tensor Index
+if interpreter:
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
 
 # Load Face Detector
 @st.cache_resource
@@ -40,16 +34,18 @@ def load_face_cascade():
 
 face_cascade = load_face_cascade()
 
-st.title("Deteksi Emosi Hybrid (CNN + Random Forest)")
+# Label Emosi (Urutkan sesuai folder dataset Anda, biasanya urutan alfabet)
+# Cek di Colab: print(list(emotion_map.values())) untuk memastikan urutannya
+LABELS = ['Anger', 'Contempt', 'Disgust', 'Fear', 'Happy', 'Sadness', 'Surprise']
 
-# --- 2. Logika Pemrosesan (Sesuai Notebook pcd2.ipynb) ---
+st.title("Deteksi Emosi Wajah (TFLite Version) 🚀")
+
+# --- 2. Logika Pemrosesan ---
 class EmotionVideoTransformer(VideoTransformerBase):
     def __init__(self):
-        self.cnn_model = cnn_model
-        self.rf_model = rf_model
-        self.labels = class_labels
         self.face_cascade = face_cascade
-
+        self.interpreter = interpreter
+        
     def transform(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
         
@@ -61,45 +57,39 @@ class EmotionVideoTransformer(VideoTransformerBase):
             # Crop Wajah
             roi_gray = gray[y:y+h, x:x+w]
             
-            # --- PREPROCESSING (Wajib sama dengan Notebook) ---
-            # 1. Resize ke 96x96 (sesuai pcd2.ipynb)
+            # Preprocessing (Wajib sama dengan training: 96x96, normalize)
             roi = cv2.resize(roi_gray, (96, 96), interpolation=cv2.INTER_AREA)
-            
-            # 2. Normalisasi & Reshape
             roi = roi.astype('float32') / 255.0
-            roi = np.expand_dims(roi, axis=0)   # (1, 96, 96)
-            roi = np.expand_dims(roi, axis=-1)  # (1, 96, 96, 1)
+            roi = np.expand_dims(roi, axis=0)
+            roi = np.expand_dims(roi, axis=-1)
 
-            try:
-                # --- PREDIKSI HYBRID ---
-                # Langkah 1: Ekstrak Fitur pakai CNN
-                features = self.cnn_model.predict(roi, verbose=0)
+            if self.interpreter:
+                # --- PREDIKSI TFLITE ---
+                self.interpreter.set_tensor(input_details[0]['index'], roi)
+                self.interpreter.invoke()
+                output_data = self.interpreter.get_tensor(output_details[0]['index'])
                 
-                # Langkah 2: Prediksi pakai Random Forest
-                prediction_idx = self.rf_model.predict(features)[0]
-                proba = self.rf_model.predict_proba(features)[0]
-                confidence = np.max(proba) * 100
+                # Ambil hasil tertinggi
+                idx = np.argmax(output_data[0])
+                confidence = np.max(output_data[0]) * 100
+                label_text = f"{LABELS[idx]} ({confidence:.1f}%)"
                 
-                label_text = f"{self.labels[prediction_idx]} ({confidence:.1f}%)"
+                # Warna-warni
+                color = (0, 255, 0) if LABELS[idx] == 'Happy' else (0, 0, 255)
                 
-                # Gambar Kotak
-                color = (0, 255, 0) if self.labels[prediction_idx] == 'happy' else (0, 0, 255)
                 cv2.rectangle(img, (x, y), (x+w, y+h), color, 2)
                 cv2.putText(img, label_text, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-                
-            except Exception as e:
-                print(f"Prediction Error: {e}")
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# --- 3. Tampilan WebRTC ---
-if cnn_model is not None and rf_model is not None:
+# --- 3. WebRTC ---
+if interpreter:
     webrtc_streamer(
-        key="hybrid-emotion",
+        key="emotion-lite",
         mode=WebRtcMode.SENDRECV,
         video_transformer_factory=EmotionVideoTransformer,
         media_stream_constraints={"video": True, "audio": False},
         async_processing=True
     )
 else:
-    st.warning("Model belum dimuat dengan benar. Cek file .keras, .pkl, dan .json Anda.")
+    st.error("Model final_model.tflite tidak ditemukan di GitHub!")
